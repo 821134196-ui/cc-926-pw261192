@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>固定延迟服务 · 固定并发 vs 动态并发调节器</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7;
+    --surface-1: #fcfcfb;
+    --surface-2: #f3f2ee;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --border: rgba(11, 11, 11, 0.1);
+    --series-blue: #2a78d6;
+    --series-orange: #eb6834;
+    --series-aqua: #1baf7a;
+    --series-red: #e34948;
+    --series-violet: #6250d6;
+    --band-fill: rgba(11, 11, 11, 0.045);
+    --good: #0ca30c;
+    --critical: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page: #0d0d0d;
+      --surface-1: #1a1a19;
+      --surface-2: #232322;
+      --text-primary: #f0efec;
+      --text-secondary: #c3c2b7;
+      --text-muted: #898781;
+      --grid: #2c2c2a;
+      --axis: #383835;
+      --border: rgba(255, 255, 255, 0.1);
+      --series-blue: #3987e5;
+      --series-orange: #d95926;
+      --series-aqua: #199e70;
+      --series-red: #e66767;
+      --series-violet: #9085e9;
+      --band-fill: rgba(255, 255, 255, 0.05);
+      --good: #0ca30c;
+      --critical: #e66767;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface-1: #1a1a19;
+    --surface-2: #232322;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.1);
+    --series-blue: #3987e5;
+    --series-orange: #d95926;
+    --series-aqua: #199e70;
+    --series-red: #e66767;
+    --series-violet: #9085e9;
+    --band-fill: rgba(255, 255, 255, 0.05);
+    --good: #0ca30c;
+    --critical: #e66767;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 24px 64px; }
+  header h1 { font-size: 22px; margin: 0 0 6px; }
+  header p { margin: 4px 0; color: var(--text-secondary); max-width: 900px; }
+  header code { background: var(--surface-2); padding: 1px 6px; border-radius: 4px; font-size: 12.5px; }
+
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 18px 26px; align-items: flex-end;
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px 18px; margin: 20px 0 8px;
+  }
+  .ctl { display: flex; flex-direction: column; gap: 4px; min-width: 150px; }
+  .ctl label { font-size: 12px; color: var(--text-muted); }
+  .ctl output { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+  .ctl input[type="range"] { width: 150px; accent-color: var(--series-blue); }
+  button {
+    font: inherit; border: 1px solid var(--border); background: var(--surface-2);
+    color: var(--text-primary); border-radius: 8px; padding: 8px 16px; cursor: pointer;
+  }
+  button:hover { border-color: var(--series-blue); }
+  button.primary { background: var(--series-blue); color: #fff; border-color: transparent; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+
+  .chart-card {
+    position: relative; background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px 14px 8px; margin-top: 16px; min-width: 0;
+  }
+  .chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .chart-head h3 { font-size: 14px; margin: 0; font-weight: 600; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; }
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+  .legend-key { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+  .chart-canvas { display: block; }
+  .chart-tip {
+    display: none; position: absolute; z-index: 5; pointer-events: none;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 18px rgba(0, 0, 0, 0.18); min-width: 148px;
+  }
+  .tip-time { color: var(--text-muted); margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+  .tip-row { display: grid; grid-template-columns: 14px 1fr auto; gap: 6px; align-items: center; padding: 1px 0; }
+  .tip-key { width: 12px; height: 0; }
+  .tip-name { color: var(--text-secondary); }
+  .tip-row strong { font-variant-numeric: tabular-nums; }
+
+  .kpis { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 20px; }
+  @media (max-width: 900px) { .kpis { grid-template-columns: 1fr; } }
+  .kpi-col { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+  .kpi-col h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .kpi .label { font-size: 12px; color: var(--text-muted); }
+  .kpi .value { font-size: 22px; font-weight: 600; margin-top: 2px; }
+  .kpi .sub { font-size: 12px; color: var(--text-muted); margin-top: 1px; }
+  .kpi .value.good { color: var(--good); }
+  .kpi .value.bad { color: var(--critical); }
+
+  .segbar { display: flex; height: 10px; border-radius: 999px; overflow: hidden; margin: 12px 0 6px; background: var(--surface-2); }
+  .segbar .seg-ok { background: var(--series-aqua); }
+  .segbar .seg-rej { background: var(--series-red); }
+  .seg-legend { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-secondary); }
+  .seg-legend span { display: inline-flex; gap: 5px; align-items: center; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+  th, td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--text-muted); font-weight: 500; }
+  .table-card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 8px 18px 14px; margin-top: 16px; }
+  .table-card h3 { font-size: 14px; margin: 10px 0 2px; }
+  .note { font-size: 12.5px; color: var(--text-muted); margin-top: 10px; }
+  details summary { cursor: pointer; color: var(--text-secondary); margin: 6px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>固定延迟服务：固定并发 vs 排队时延动态并发调节</h1>
+    <p>
+      服务处理时间固定 <code id="svc-desc"></code>，25 个 worker，系统真实能力 <code>125 req/s</code>。
+      请求准入即占用并发 permit（排队中 + 服务中），达到上限立即快速拒绝。
+      动态调节器按 EMA 排队时延做 <b>AIMD</b>（加性增、乘性减，每步幅度封顶，带死区防抖），
+      低频高优先请求走独立预留容量并在队头优先调度。两种模式复用<strong>同一条压力曲线</strong>。
+    </p>
+  </header>
+
+  <section class="controls" aria-label="仿真参数">
+    <div class="ctl">
+      <label>突发期到达率 <output id="out-burst">160 req/s</output></label>
+      <input id="in-burst" type="range" min="120" max="240" step="10" value="160" />
+    </div>
+    <div class="ctl">
+      <label>固定并发上限 <output id="out-fixed">20</output></label>
+      <input id="in-fixed" type="range" min="10" max="30" step="1" value="20" />
+    </div>
+    <div class="ctl">
+      <label>目标排队时延 <output id="out-target">50 ms</output></label>
+      <input id="in-target" type="range" min="20" max="120" step="5" value="50" />
+    </div>
+    <div class="ctl">
+      <label>动态调节范围 <output id="out-range">8 – 40</output></label>
+      <input id="in-max" type="range" min="30" max="60" step="2" value="40" />
+    </div>
+    <button class="primary" id="btn-run">重新仿真（同曲线）</button>
+    <button id="btn-seed">换一条压力曲线</button>
+    <button id="btn-theme">切换明暗主题</button>
+  </section>
+
+  <section class="kpis" aria-label="结果汇总">
+    <div class="kpi-col" id="kpi-fixed"></div>
+    <div class="kpi-col" id="kpi-dynamic"></div>
+  </section>
+
+  <div class="grid2">
+    <div id="chart-input"></div>
+    <div id="chart-limit"></div>
+    <div id="chart-delay"></div>
+    <div id="chart-cum"></div>
+  </div>
+
+  <div class="table-card">
+    <h3>明细表（普通 / 高优先请求分别统计）</h3>
+    <table id="result-table">
+      <thead>
+        <tr>
+          <th>模式</th><th>请求类别</th><th>到达</th><th>完成</th><th>拒绝</th><th>拒绝率</th>
+          <th>平均排队</th><th>峰值排队</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p class="note">
+      突发段 10–22s、中载段 32–40s 以浅灰底纹标出。表格与图表同源，悬停图表可查看任一时刻的逐系列数值。
+    </p>
+    <details>
+      <summary>调节器规则说明</summary>
+      <p class="note">
+        每 0.5s 评估一次 EMA 排队时延：高于目标 ×1.5 时乘性减（下调 20%，单步最多 4）；
+        低于目标 ×0.5 时加性增（每周期 +1）；死区内保持不变。limit 钳制在动态范围内，
+        因此突发时快速收敛、流量回落后缓慢恢复到稳定态且不振荡。高优先请求（2 req/s）
+        不受普通 permit 上限约束，可使用全部 25 个 worker 外加 4 个专用排队位，并在调度时队头优先。
+      </p>
+    </details>
+  </div>
+</div>
+
+<script type="module">
+  import { runComparison } from './sim.js';
+  import { TimeSeriesChart } from './chart.js';
+
+  const $ = (id) => document.getElementById(id);
+  const charts = {};
+  let seed = 20261127;
+
+  const fmtInt = (v) => Math.round(v).toLocaleString('en-US');
+  const fmtMs = (v) => Math.round(v * 1000) + ' ms';
+  const fmtPct = (v) => (v * 100).toFixed(1) + '%';
+
+  function readConfig() {
+    return {
+      seed,
+      serviceTime: 0.2,
+      workers: 25,
+      baselineRate: 40,
+      stages: [
+        [10, 40],
+        [22, +$('in-burst').value],
+        [32, 40],
+        [40, 110],
+        [60, 40],
+      ],
+      fixedLimit: +$('in-fixed').value,
+      targetDelay: +$('in-target').value / 1000,
+      dynMin: 8,
+      dynMax: +$('in-max').value,
+    };
+  }
+
+  function syncLabels() {
+    $('out-burst').textContent = $('in-burst').value + ' req/s';
+    $('out-fixed').textContent = $('in-fixed').value;
+    $('out-target').textContent = $('in-target').value + ' ms';
+    $('out-range').textContent = '8 – ' + $('in-max').value;
+  }
+
+  function kpiColumn(el, title, color, r, cfg) {
+    const s = r.summary;
+    el.replaceChildren();
+    const h = document.createElement('h2');
+    h.innerHTML = `<span class="dot" style="background:${color}"></span>${title}`;
+    el.appendChild(h);
+
+    const grid = document.createElement('div');
+    grid.className = 'kpi-grid';
+    const tiles = [
+      ['实际完成', fmtInt(s.completed), 'good', '请求数'],
+      ['拒绝', fmtInt(s.rejected), 'bad', '拒绝率 ' + fmtPct(s.rejectRate)],
+      ['平均 / 峰值排队', fmtMs(s.avgWait), '', '峰值 ' + fmtMs(s.maxWait)],
+    ];
+    for (const [label, value, cls, sub] of tiles) {
+      const t = document.createElement('div');
+      t.className = 'kpi';
+      t.innerHTML = `<div class="label">${label}</div><div class="value ${cls}">${value}</div><div class="sub">${sub}</div>`;
+      grid.appendChild(t);
+    }
+    el.appendChild(grid);
+
+    const total = s.completed + s.rejected;
+    const bar = document.createElement('div');
+    bar.className = 'segbar';
+    bar.innerHTML =
+      `<div class="seg-ok" style="width:${(s.completed / total) * 100}%"></div>` +
+      `<div class="seg-rej" style="width:${(s.rejected / total) * 100}%"></div>`;
+    el.appendChild(bar);
+    const lg = document.createElement('div');
+    lg.className = 'seg-legend';
+    lg.innerHTML =
+      `<span><span class="dot" style="background:var(--series-aqua)"></span>完成 ${fmtInt(s.completed)}</span>` +
+      `<span><span class="dot" style="background:var(--series-red)"></span>拒绝 ${fmtInt(s.rejected)}</span>`;
+    el.appendChild(lg);
+
+    if (r.mode === 'dynamic') {
+      const n = document.createElement('p');
+      n.className = 'note';
+      n.style.marginBottom = '0';
+      n.textContent = `limit 轨迹 ${s.limitMin} → ${s.limitMax}（终态 ${s.finalLimit}），超出目标时延累计 ${s.timeAboveTarget.toFixed(1)}s`;
+      el.appendChild(n);
+    } else {
+      const n = document.createElement('p');
+      n.className = 'note';
+      n.style.marginBottom = '0';
+      n.textContent = `并发恒定 ${cfg.fixedLimit}，有效能力 ${(cfg.fixedLimit / cfg.serviceTime).toFixed(0)} req/s，超额请求当场拒绝`;
+      el.appendChild(n);
+    }
+  }
+
+  function fillTable(fixed, dynamic) {
+    const tb = $('result-table').querySelector('tbody');
+    tb.replaceChildren();
+    const row = (modeName, clsName, st, total) => {
+      const tr = document.createElement('tr');
+      const arrived = st.arrived;
+      tr.innerHTML =
+        `<td>${modeName}</td><td>${clsName}</td>` +
+        `<td>${fmtInt(arrived)}</td><td>${fmtInt(st.completed)}</td>` +
+        `<td>${fmtInt(st.rejected)}</td><td>${fmtPct(arrived ? st.rejected / arrived : 0)}</td>` +
+        `<td>${st.completed ? fmtMs(st.sumWait / st.completed) : '—'}</td><td>${fmtMs(st.maxWait)}</td>`;
+      tb.appendChild(tr);
+    };
+    row('固定并发', '普通', fixed.stats.normal);
+    row('固定并发', '高优先', fixed.stats.priority);
+    row('动态并发', '普通', dynamic.stats.normal);
+    row('动态并发', '高优先', dynamic.stats.priority);
+  }
+
+  function ensureCharts(cfg) {
+    const bands = [
+      { from: 10, to: 22, label: '突发' },
+      { from: 32, to: 40, label: '中载过载' },
+    ];
+    charts.input ??= new TimeSeriesChart($('chart-input'), {
+      title: '压力曲线（两种模式同一条到达流）',
+      series: [{ name: '到达率', color: 'var(--series-aqua)', fmt: (v) => v + ' req/s' }],
+      refLines: [{ value: cfg.workers / cfg.serviceTime, label: '系统能力 125 req/s', color: 'var(--axis)', dash: true }],
+      bands,
+      fmtY: (v) => v,
+    });
+    charts.limit ??= new TimeSeriesChart($('chart-limit'), {
+      title: '并发上限与在途请求数',
+      yMax: 70,
+      series: [
+        { name: '动态 limit', color: 'var(--series-blue)' },
+        { name: '固定 limit', color: 'var(--series-orange)', dash: [6, 4] },
+        { name: '动态在途', color: 'var(--series-violet)', dash: [2, 3] },
+      ],
+      bands,
+      fmtY: (v) => v,
+    });
+    charts.delay ??= new TimeSeriesChart($('chart-delay'), {
+      title: 'EMA 排队时延（调节器输入信号）',
+      series: [
+        { name: '动态模式', color: 'var(--series-blue)', fmt: (v) => fmtMs(v) },
+        { name: '固定模式', color: 'var(--series-orange)', dash: [6, 4], fmt: (v) => fmtMs(v) },
+      ],
+      refLines: [{ value: cfg.targetDelay, label: `目标 ${cfg.targetDelay * 1000}ms`, color: 'var(--critical)', dash: true }],
+      bands,
+      fmtY: (v) => Math.round(v * 1000) + 'ms',
+    });
+    charts.cum ??= new TimeSeriesChart($('chart-cum'), {
+      title: '累计完成与拒绝',
+      series: [
+        { name: '完成 · 动态', color: 'var(--series-blue)' },
+        { name: '完成 · 固定', color: 'var(--series-orange)', dash: [6, 4] },
+        { name: '拒绝 · 动态', color: 'var(--series-red)' },
+        { name: '拒绝 · 固定', color: 'var(--series-red)', dash: [2, 3] },
+      ],
+      bands,
+      fmtY: (v) => fmtInt(v),
+    });
+  }
+
+  function run() {
+    syncLabels();
+    const cfg = readConfig();
+    const { fixed, dynamic } = runComparison(cfg);
+    $('svc-desc').textContent = `服务时间 ${cfg.serviceTime * 1000} ms`;
+
+    kpiColumn($('kpi-fixed'), '固定并发（limit=' + cfg.fixedLimit + '）', 'var(--series-orange)', fixed, cfg);
+    kpiColumn($('kpi-dynamic'), '动态并发（AIMD 调节器）', 'var(--series-blue)', dynamic, cfg);
+    fillTable(fixed, dynamic);
+    ensureCharts(cfg);
+
+    charts.input.setData(fixed.records, [(r) => r.rate]);
+    charts.limit.setData(dynamic.records, [
+      (r) => r.limit,
+      () => cfg.fixedLimit,
+      (r) => r.inFlight,
+    ]);
+    charts.delay.setData(dynamic.records, [
+      (r) => r.emaDelay,
+      (_r, i) => fixed.records[i].emaDelay,
+    ]);
+    // 延迟图的目标线随参数变化
+    charts.delay.opts.refLines = [{ value: cfg.targetDelay, label: `目标 ${cfg.targetDelay * 1000}ms`, color: 'var(--critical)', dash: true }];
+    charts.delay.render();
+    charts.cum.setData(dynamic.records, [
+      (r) => r.completed,
+      (_r, i) => fixed.records[i].completed,
+      (r) => r.rejected,
+      (_r, i) => fixed.records[i].rejected,
+    ]);
+  }
+
+  ['in-burst', 'in-fixed', 'in-target', 'in-max'].forEach((id) => $(id).addEventListener('input', run));
+  $('btn-run').addEventListener('click', run);
+  $('btn-seed').addEventListener('click', () => {
+    seed = (Math.random() * 1e9) | 0;
+    run();
+  });
+  $('btn-theme').addEventListener('click', () => {
+    const root = document.documentElement;
+    root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
+    // 主题切换后颜色依赖 CSS 变量，下一帧重绘全部图表
+    requestAnimationFrame(() => Object.values(charts).forEach((c) => c.render()));
+  });
+
+  run();
+</script>
+</body>
+</html>
